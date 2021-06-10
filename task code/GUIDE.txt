@@ -1,0 +1,12 @@
+Guide to files/folders used to run the Leapfrog task:
+
+data/             -folder where the task data gets saves
+images/           -folder where all image files used in the experiment are saved
+lib/              -contains the PyPsyExp library
+sounds/           -folder where all sound files used in the experiment are saved
+eztext.py         -contains code for text box inputs (https://github.com/ffavela/eztext)
+inst_text.py      -contains the text used in the task instructions
+leapfrog.py       -the main experiment code. Run this to run the experiment.
+params.py         -contains some basic experiment settings (e.g. number of trials)
+patterncode.txt   -usually used for automatic subject number and condition assignment (not in use here)
+text.py           -contains some utility code used in displaying the instructions

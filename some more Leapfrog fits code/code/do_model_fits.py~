@@ -1,0 +1,577 @@
+from pylab import *
+from numpy import *
+from copy import copy
+from scipy.stats import *
+from string import split
+from random import random, choice
+import os
+import cPickle
+from time import time
+
+def generateChanceSubjects():
+    subjects = {}
+    i  = 0
+    for cond in ['0.075']: #['0.025', '0.075', '0.125']*25:
+        [leapfrog_rewards, obs_p_flip] = generateLeapfrogRewards(NUM_TRIALS, float(cond))
+        subjects[i] = {'cond':cond, 'trials':[]}
+        for trial in range(NUM_TRIALS):
+            resp = choice([0,1])
+            trial_reward = leapfrog_rewards[trial][resp]
+            subjects[i]['trials'].append({'opt_resp': {True:1, False:0}[trial_reward == max(leapfrog_rewards[trial])],
+                                          'a_reward':leapfrog_rewards[0,1], 'b_reward':leapfrog_rewards[0][0],
+                                          'resp':resp, 'reward':trial_reward})
+        i += 1
+    return subjects
+
+def smooth(data, window_size):
+    smoothed = zeros(len(data)-(window_size-1))
+    for i in range(0, len(data)-window_size+1):
+        smoothed[i] = mean( data[i:i+window_size])
+    return concatenate((zeros(window_size-1),smoothed))
+
+def plotBlockedExplores(subjects):
+    conditions = {}
+    GRANULARITY = 25
+
+    for subj_num, subject in subjects.iteritems():
+        subject['smoothed_explores'] = smooth(array(map(lambda x:x['explore'], subject['trials'])), 10)
+
+    conditions = {}
+    for cond in unique([j['cond'] for j in subjects.values()]): 
+        conditions[cond] = {}
+        explores = array([i['smoothed_explores'] for i in subjects.values() if i['cond']==cond])
+        conditions[cond]['explores'] = explores.transpose()
+        cond_color = {'0.025':(0,0,1), '0.075':(0, .5, 0), '0.125':(1,0,0)}[cond]
+        e_color = [min(1, i+.8) for i in cond_color] + [.2]
+        errorbar( range(500), map(mean, conditions[cond]['explores']), yerr=map(stderr, conditions[cond]['explores']), label=cond, color=cond_color,  elinewidth=3, ecolor=e_color, capsize=0)
+    return
+
+    for cond_name, cond_obj in conditions.iteritems():
+        blockTotal = 0
+        cond_obj['block_means'] = []
+        cond_obj['block_stderr'] = []
+        trial_hits = []
+        for trial in range(NUM_TRIALS):
+            for subj_num, subject in model_sims.iteritems():
+                if(subject['cond'] == cond_name): trial_hits.append( subject['trials'][trial]['explore'])
+            if(((trial+1) % GRANULARITY) == 0):
+                cond_obj['block_means'].append(mean(trial_hits))
+                cond_obj['block_stderr'].append( stderr(trial_hits))
+                trial_hits = []
+    f = figure()
+    xrange = range(0, int(NUM_TRIALS/GRANULARITY))
+    for cond_name in COND_NAMES:
+        x_ticks = map(lambda x:(x+1)*GRANULARITY, xrange)
+        plot_style = '-' #{'0.025':':', '0.075':'--', '0.125':'-'}[cond_name]
+        plot_color = {'0.025':(0,0,1), '0.075':(0, .5, 0), '0.125':(1,0,0)}[cond_name] 
+        errorbar( x_ticks, conditions[cond_name]['block_means'], yerr = zeros(len(conditions[cond_name]['block_stderr'])),
+                  label=cond_name, linewidth=1,capsize=2, ecolor = 'black', ls=plot_style, color=plot_color)
+    ylabel('Proportion Explorory Trials')
+    xlabel('Trial')
+    legend(loc='best', fancybox=True, title='P(flip)')
+    show()
+
+
+
+def getProbabilisticAction(resp_prob):
+    rand_num = random()
+    if(rand_num <= resp_prob):  return 1
+    else:   return 0
+
+def getActionProbability(orig_action_values, exploitation):
+    if(orig_action_values[0] == orig_action_values[1]): action_values = array([1,1])
+    elif(max(orig_action_values)==orig_action_values[0]): action_values = array([orig_action_values[0]-orig_action_values[1], 0])
+    else: action_values = array([ 0, orig_action_values[1]-orig_action_values[0]])
+    numerator = exp( action_values[0] * exploitation)
+    denominator = sum( exp(action_values * exploitation) )
+    if(isinf(numerator) or isinf(denominator)):
+        print action_values
+        raise SystemExit, 'exp() blew up'
+    return numerator / denominator
+
+
+def generateLeapfrogRewards(num_trials, p_flip):
+     leapfrog_rewards = zeros((num_trials,2))
+     a_reward = 10
+     b_reward = 20
+     last_changed = 'b'
+     num_switches = 0
+     for trial_num in range(num_trials):
+          if(random() < p_flip):
+               num_switches += 1
+               if(last_changed == 'b'): 
+                    last_changed  = 'a'
+                    a_reward += 20.0
+               else:
+                    last_changed = 'b'
+                    b_reward += 20.0
+          leapfrog_rewards[trial_num] = array([b_reward,a_reward])
+     return [array(leapfrog_rewards), num_switches / float(num_trials)]
+
+def getSubjectEnvSwitches(subjects):
+    for subj_num, subject in subjects.iteritems():
+        a_reward = map(lambda x:x['a_reward'],subject['trials'])
+        b_reward = map(lambda x:x['b_reward'],subject['trials'])
+        [a_switches,b_switches] = [0,0]
+        [subject['trials'][0]['a_switch'],subject['trials'][0]['b_switch']] = [0,0]
+        for i in range(1, len(subject['trials'])):
+            [subject['trials'][i]['a_switch'],subject['trials'][i]['b_switch']] = [0,0]
+            if(a_reward[i] != a_reward[i-1]): 
+                a_switches+=1
+                subject['trials'][i]['a_switch'] = 1
+            if(b_reward[i] != b_reward[i-1]): 
+                b_switches+=1
+                subject['trials'][i]['b_switch'] = 1            
+
+def getNumEnvSwitches(leapfrog_rewards):
+     a_reward = leapfrog_rewards[:,1] #map(lambda x:x['a_reward'],subject['trials'])
+     b_reward = leapfrog_rewards[:,0] #map(lambda x:x['b_reward'],subject['trials'])
+     [a_switches,b_switches] = [0,0]
+     for i in range(len(leapfrog_rewards)):
+          if(a_reward[i] != a_reward[i-1]):                a_switches+=1
+          elif(b_reward[i] != b_reward[i-1]):           b_switches+=1
+     return sum([a_switches, b_switches])
+
+def getOptResps(subjects):
+    for subj_num, subject in subjects.iteritems():
+         for trial in subject['trials']:
+              if( trial['reward'] == max([trial['a_reward'], trial['b_reward']])): trial['opt_resp'] = 1
+              else: trial['opt_resp'] = 0
+
+def getTrialsUntilSwitch(subjects):
+    for subj_num, subject in subjects.iteritems():
+        trials = subject['trials']
+        num_trials_until_switch = [0]
+        for i in range(1, TRIALS_END):
+            if(not trials[i]['opt_resp']):
+                num_trials_until_switch[-1] +=1
+            else:
+                if(not (num_trials_until_switch[-1]==0)):
+                    num_trials_until_switch.append(0)
+        subject['trials_until_switch'] = mean(num_trials_until_switch)
+
+
+
+def getExploreTrials(data):
+    alpha = 1.
+    Q = array([0.0, 0.0])
+    for subj_trial in data:
+        subj_action = int(subj_trial['resp'])
+        subj_reward = subj_trial['reward']
+        if(subj_action != Q.tolist().index(max(Q))):  subj_trial['explore']=1
+        else: subj_trial['explore']= 0 
+        Q[subj_action] += alpha * (subj_reward - Q[subj_action])
+
+def loadAllStateActVals(num_trials, load_cached=False):
+    if(load_cached):
+        filename = 'cached_alphas/'+str(num_trials)+'_trial_state_act_vals.dat'
+        print 'loading alpha files from:', filename
+        temp = open(filename, 'rb')
+        allStateActVals = cPickle.load(temp)
+        temp.close()
+        return allStateActVals
+    else:
+        print 'loading alpha files from alpha directory'
+        allStateActVals = {}
+        alpha_dirs = filter(lambda x:(str((2*num_trials)-1)+'_trial' in x),  os.listdir('alphas/'))
+        alpha_p_flips = array(sorted(map(lambda x:float(x.split('_')[3]),alpha_dirs)))
+        for alpha_p_flip in alpha_p_flips:
+            stateActValsGivenTrial = {}                 
+            dir_name = './alphas/alphas_'+str((2*num_trials)-1)+'_trial_'+str(alpha_p_flip)
+            print '\t', dir_name
+            file_names = os.listdir(dir_name)
+            for file_name in file_names:
+                if(not ('.alpha' in file_name)): continue
+                if(file_name.split('alpha')[1]==''): continue
+                alpha_file = file(dir_name+'/'+ file_name, 'r')
+                horizon = int(file_name.split('alpha')[1])
+                alpha_lines = alpha_file.readlines()
+                alpha_file.close()
+                alpha_array = filter(lambda x:len(x) > 1, alpha_lines)
+                acts = filter(lambda x:len(x) == 2, alpha_array)
+                acts = map(lambda x:float(x[0]), acts)
+                acts = array(acts)
+                stateActVals = filter(lambda x:len(x) > 3, alpha_array)
+                stateActVals = map(lambda x:split(x, ' '), stateActVals)
+                stateActVals = map(lambda x:x[0:9], stateActVals)
+                stateActVals = array(map(lambda x:map(float, x), stateActVals))
+                stateActValsGivenTrial[horizon] = {'acts':acts, 'stateActVals':stateActVals}
+            allStateActVals[alpha_p_flip] = stateActValsGivenTrial
+        filename = 'cached_alphas/'+str(num_trials)+'_trial_state_act_vals.dat'
+        print 'saving cached alpha files to:', filename
+        temp = open(filename, 'wb')
+        cPickle.dump(allStateActVals, temp, True)
+        temp.close() 
+    return allStateActVals
+
+
+def recomputeBelief(model_trials, post_vol):
+    preJumpBelief = 1
+    for trial in model_trials:
+        preJumpBelief = getStateDistFromLastBelief(preJumpBelief, 1-trial['explore'], trial['jumps_observed'], 
+                                                   post_vol)[0]
+    return preJumpBelief
+
+
+def getSuboptActVal(exploitOptAct, trialStateActVals, preJumpBelief, postJump3StateBelief, belief_p_flip, trial):
+     if(exploitOptAct): # assumes that the actor will explore, since this is the suboptimal action
+          exploit = 0
+          obsByUnobsJumps = array([0, 1, 1])
+          relRewByUnobsJumps = array([0, 10, 0])
+          immedRew = inner(postJump3StateBelief, relRewByUnobsJumps)  #if the suboptimal action is to explore
+     else: # suboptimal action is exploit
+          exploit = 1
+          obsByUnobsJumps = array([0, 0, 2])
+          relRewByUnobsJumps = array([10, 0, 10])
+          immedRew = inner(postJump3StateBelief, relRewByUnobsJumps)  #if the suboptimal action is to exploit
+
+     suboptActionValue = immedRew
+     nextTrialAlphaIndex = ((NUM_TRIALS-(trial+1)) * 2) - 1
+     if nextTrialAlphaIndex > 0:
+         for hypothUnobservedJumps in range(0,3):
+             obsJumps = obsByUnobsJumps[hypothUnobservedJumps]
+             hypothPreJumpBelief = getStateDistFromLastBelief(preJumpBelief, exploit, obsJumps, belief_p_flip)[0]
+             if isnan(hypothPreJumpBelief):  continue
+             hypothPostJump3StateBelief = array(get3StateDistFromPreJumpDist(hypothPreJumpBelief, belief_p_flip))
+             hypothStateActVals = trialStateActVals[nextTrialAlphaIndex]['stateActVals'].copy()
+             hypothActs  =trialStateActVals[nextTrialAlphaIndex]['acts'].copy()
+
+             hypothMaxAct = None
+             hypothMaxVal = 0
+             extended_belief  = concatenate((hypothPostJump3StateBelief, zeros(6)))
+
+             hypothVals = inner(concatenate((hypothPostJump3StateBelief,(0,0,0,0,0,0))), hypothStateActVals)
+             hypothMaxVal = max(hypothVals)
+             hypothMaxValAct = hypothActs[ where(hypothVals==max(hypothVals))[0][0] ]
+
+             suboptActionValue += postJump3StateBelief[hypothUnobservedJumps] * hypothMaxVal
+     return suboptActionValue
+    
+
+###   
+# Guide to arguments:                                
+# 1) lastBelief - the prob that exploit (as defined after the second-to-last action and observation)
+# gave the highest reward before the last action and observation.
+# 2) exploit - whether the last action was an exploit (vs. explore)
+# 3) jumpsObserved - how many previously unobserved jumps were observed in the last observation.
+# 4) jumpProb - the preset volatility rate               
+#                                                                                           
+# This function returns the probability that, after the last action and observation but before the
+# potential next jump, exploiting will receive the highest reward. The first number returned is this
+# probability in terms of what action is considered the exploit action after the last observation,
+# and the second number is in terms of the action that was exploitative before the last observation
+# (i.e., the action that lastBelief considers exploitative).
+###
+def getStateDistFromLastBelief(lastPreJumpBelief, exploit, jumpsObserved, jumpProb):
+    if exploit:        obsByNumJumps = array([0, 0, 2] )
+    else:         obsByNumJumps = array([0, 1, 1])
+    jProb00 = lastPreJumpBelief * (1 - jumpProb) * (jumpsObserved == obsByNumJumps[0])
+    jProb01 = lastPreJumpBelief * jumpProb * (jumpsObserved == obsByNumJumps[1])
+    jProb11 = (1 - lastPreJumpBelief) * (1 - jumpProb) * (jumpsObserved == obsByNumJumps[1])
+    jProb12 = (1 - lastPreJumpBelief) * jumpProb * (jumpsObserved == obsByNumJumps[2])
+    probPrevExploitOptNum = jProb00 + jProb12
+    probPrevExploitOptDen = probPrevExploitOptNum + jProb01 + jProb11
+    probPrevExploitOpt = probPrevExploitOptNum / probPrevExploitOptDen
+    probCurrExploitOpt = probPrevExploitOpt
+    if not exploit and jumpsObserved == 1:        probCurrExploitOpt = 1 - probCurrExploitOpt
+    return (probCurrExploitOpt, probPrevExploitOpt)
+
+###
+# This function should be called to convert the output of getStateDistFromLastBelief()
+# to the three-state belief state used in the POMDP specification, which includes 
+# consideration of the a possible post-observation jump.
+###
+def get3StateDistFromPreJumpDist(belief, jumpProb):
+    noJumpProb = 1 - jumpProb
+    twoStateDist = (belief, 1- belief)
+    postJumpState1Prob = twoStateDist[0] * noJumpProb
+    postJumpState2Prob = (twoStateDist[0] * jumpProb) + (twoStateDist[1] * noJumpProb)
+    postJumpState3Prob = twoStateDist[1] * jumpProb
+    return (postJumpState1Prob, postJumpState2Prob, postJumpState3Prob)
+
+        
+
+def doActorSim(leapfrog_rewards, belief_p_flip, exploit, allStateActVals, full_output=False, learn_p_flip=False,
+               beliefs_only=False):
+     highestRawActionSeen = 0 #B, right?    
+     highestRewardSeen = 20 #right?
+
+     preJumpBelief = 1 # this is the belief after the last action and observation, but before a potential hidden jump; it should be used to get the following step's preJumpBelief (postJumpBelief should not be used)
+     postJump3StateBelief = array(get3StateDistFromPreJumpDist(preJumpBelief, belief_p_flip))
+     postJumpBelief = postJump3StateBelief[0] + postJump3StateBelief[2] # 
+
+     
+     state_act_val_p_flips = array(sorted(allStateActVals.keys()))
+     state_act_val_p_flip = state_act_val_p_flips[(belief_p_flip <= state_act_val_p_flips)][0]
+     trialStateActVals = allStateActVals[state_act_val_p_flip]
+
+     num_jumps_seen = 0
+     [a0, b0] = [belief_p_flip*10, (1-belief_p_flip)*10]
+     belief_p_flip = (num_jumps_seen+a0) / (num_jumps_seen+a0-num_jumps_seen+b0)
+
+     if(full_output): model_trials = []
+     else: [explore, opt_resp] = [zeros(NUM_TRIALS), zeros(NUM_TRIALS)]
+
+     for trial in range(NUM_TRIALS):
+         stateActVals = trialStateActVals[((NUM_TRIALS-trial) * 2)- 1]['stateActVals'].copy()
+         acts  =trialStateActVals[((NUM_TRIALS-trial) * 2)- 1]['acts'].copy()
+         extended_belief  = concatenate((postJump3StateBelief, zeros(6)))
+         vals = inner(concatenate((postJump3StateBelief, (0,0,0,0,0,0))), stateActVals)
+
+         maxActVal = max(vals)
+         maxValAct = acts[where(vals==max(vals))[0][0]]
+         exploitOptimal = (maxValAct == 0)
+         suboptActionValue = getSuboptActVal(exploitOptimal, trialStateActVals, preJumpBelief, postJump3StateBelief, belief_p_flip, trial)
+         
+         if(beliefs_only):
+             p_exploit = getActionProbability(array([postJumpBelief, 1.-postJumpBelief]), exploit)
+             chose_exploit = getProbabilisticAction(p_exploit)
+             chose_exploit = {0:False, 1:True}[chose_exploit]
+#             if(postJumpBelief > .5): chose_exploit = True
+#             else: chose_exploit = False
+         else:
+             p_opt = 1. #getActionProbability(array([maxActVal, suboptActionValue]), exploit)
+             took_opt =  getProbabilisticAction(p_opt)
+             if (exploitOptimal and not took_opt) or (not exploitOptimal and took_opt):         chose_exploit = False
+             else:          chose_exploit = True
+
+         if chose_exploit:
+             rawActionChoice = highestRawActionSeen 
+             trial_reward = leapfrog_rewards[trial][rawActionChoice]
+         else: #explore
+             rawActionChoice = 1 - highestRawActionSeen
+             trial_reward = leapfrog_rewards[trial][rawActionChoice]
+
+         jumpsObserved = 0
+         if(trial_reward > highestRewardSeen):
+             jumpsObserved = (trial_reward - highestRewardSeen) / 10
+             highestRewardSeen = trial_reward
+             highestRawActionSeen = rawActionChoice
+         
+         if(learn_p_flip):
+             num_jumps_seen += jumpsObserved
+             old_belief_p_flip = belief_p_flip
+             belief_p_flip =   (num_jumps_seen+a0) / (num_jumps_seen+a0+(trial+1)-num_jumps_seen+b0) 
+             if(abs(old_belief_p_flip - belief_p_flip) > .005): 
+                 alpha_p_flips = array(sorted(allStateActVals.keys()))
+                 if(belief_p_flip < .01): belief_p_flip = .01
+                 alpha_p_flip = alpha_p_flips[alpha_p_flips <= belief_p_flip][-1]    
+                 trialsStateActVals = allStateActVals[alpha_p_flip] 
+                 preJumpBelief = recomputeBelief( model_trials, belief_p_flip)
+
+
+         if(full_output):
+             a_switch=  {True:1,False:0}[(trial!=0) and leapfrog_rewards[trial][0]!=leapfrog_rewards[trial-1][0]]
+             b_switch= {True:1,False:0}[(trial!=0) and leapfrog_rewards[trial][1]!=leapfrog_rewards[trial-1][1]]
+             model_trials.append( {'resp':rawActionChoice, 'reward':trial_reward, 'belief_before': postJumpBelief,
+                                   'a_switch':a_switch, 'b_switch':b_switch,
+                                   'a_reward': leapfrog_rewards[trial][0], 'b_reward': leapfrog_rewards[trial][1],
+                                   'opt_resp': {True:1, False:0}[trial_reward == max(leapfrog_rewards[trial])],
+                                   'jumps_observed':jumpsObserved, 'explore':(1-exploitOptimal),
+                                   'rel_val_exploit': {True: (maxActVal-suboptActionValue),
+                                                       False: -1*(maxActVal-suboptActionValue)}[exploitOptimal],
+                                   'rel_val_opt':maxActVal-suboptActionValue, 
+                                   'belief_p_flip':belief_p_flip})
+         else:
+             opt_resp[trial] = {True:1, False:0}[trial_reward == max(leapfrog_rewards[trial])]
+             explore[trial] = {True:1, False:0}[not exploitOptimal]
+             
+         preJumpBelief = getStateDistFromLastBelief(preJumpBelief, chose_exploit, jumpsObserved, belief_p_flip)[0]
+         
+          # these are used for action selection next trial
+         postJump3StateBelief = array(get3StateDistFromPreJumpDist(preJumpBelief, belief_p_flip))
+         postJumpBelief = postJump3StateBelief[0] + postJump3StateBelief[2]
+
+     if(full_output):  return model_trials
+     else: return [opt_resp, explore]
+
+
+
+[TRIALS_START, TRIALS_END] = [0,500]
+NUM_TRIALS = 500
+model_sims = {}
+
+#'''
+filename = 'subjects_new.dat'
+print 'loading subject data from:', filename
+temp = open(filename, 'rb')
+subjects = cPickle.load(temp)
+temp.close()
+#'''
+
+#subjects = generateChanceSubjects()
+
+getSubjectEnvSwitches(subjects)
+
+COND_NAMES = map(str, unique(array([float(j['cond']) for j in subjects.values()])))
+NUM_SIMS = 1
+#BELIEF_P_FLIPS = linspace(.01, .21, 21).tolist()*NUM_SIMS  #[.025, .075, .125]*NUM_SIMS #
+#shuffle(BELIEF_P_FLIPS)
+#BELIEF_P_FLIPS = array(BELIEF_P_FLIPS)
+#BELIEF_P_FLIPS = zeros(NUM_TRIALS) + .075
+
+allStateActVals = loadAllStateActVals(NUM_TRIALS, load_cached=True)
+
+
+#ENV_P_FLIPS = array( [0.025]*(len(BELIEF_P_FLIPS)/3) + [0.075]*(len(BELIEF_P_FLIPS)/3) + [0.125]*(len(BELIEF_P_FLIPS)/3) )
+ENV_P_FLIPS = [.075]*NUM_SIMS#[.025, .075, .125]*NUM_SIMS
+ENV_P_FLIPS = array(ENV_P_FLIPS)
+#ENV_P_FLIPS = zeros(500) + .075
+
+BELIEF_P_FLIPS = ENV_P_FLIPS
+
+#for subj_num, subject in subjects.iteritems(): # #
+for sim in range(len(ENV_P_FLIPS)):
+    '''
+    rect_trials = filter(lambda x:x['resp']!=-1, subject['trials'])
+    obs_p_flip = mean(map(lambda x:x['a_switch'] or x['b_switch'], rect_trials))
+    env_p_flip = float(subject['cond'])
+
+    belief_p_flip = float(subject['cond'])# .0315  #subject['actor_p_flip'] #
+    sim = subj_num
+
+    state_act_val_p_flips = array(sorted(allStateActVals.keys()))
+    state_act_val_p_flip = state_act_val_p_flips[(belief_p_flip <= state_act_val_p_flips)][0]
+
+
+    print 'doing sim:',subj_num, NUM_TRIALS,'belief p_flip:',belief_p_flip,'obs p_flip:',obs_p_flip,'using:',state_act_val_p_flip
+    if(array((map(lambda x:x['a_switch'] and x['b_switch'], rect_trials))).any()): 
+        print '\t*** simultaneous jumps!!';raise SystemExit
+
+    a_rew = map(lambda x:x['a_reward'], rect_trials)
+    b_rew = map(lambda x:x['b_reward'], rect_trials)
+    leapfrog_rewards = array([b_rew, a_rew]).transpose()
+    '''
+   
+#    '''
+    [leapfrog_rewards, obs_p_flip] = generateLeapfrogRewards(NUM_TRIALS, ENV_P_FLIPS[sim])
+    belief_p_flip = BELIEF_P_FLIPS[sim]
+    env_p_flip = ENV_P_FLIPS[sim]
+    trialStateActVals = allStateActVals[round(belief_p_flip,3)]
+    print sim, 'cond:', env_p_flip, 'belief p(flip):', belief_p_flip, 'obs p(flip):', obs_p_flip
+#    '''
+
+#    '''
+    model_trials = doActorSim(leapfrog_rewards, belief_p_flip, .38, allStateActVals, 
+                                    full_output=True, learn_p_flip=False, beliefs_only=False)
+    model_sims[sim] = {'cond': str(env_p_flip), 'belief_p_flip':belief_p_flip, 'obs_p_flip': obs_p_flip, 'trials':model_trials}
+#    '''
+
+
+    '''
+    belief_p_flip = ENV_P_FLIPS[sim] #{.025: .046, .075: .103, .125:.134}[ ENV_P_FLIPS[sim] ]
+    exploit = {.025: 3.87, .075: 4.78, .125: 4.90}[ ENV_P_FLIPS[sim] ]
+    
+    [opt_resp, explore] = doActorSim(leapfrog_rewards, belief_p_flip, exploit, allStateActVals, 
+                                     full_output=False, learn_p_flip=False, beliefs_only=False)
+    model_sims[sim] = {'cond': str(env_p_flip), 'belief_p_flip':belief_p_flip,
+                       'obs_p_flip': obs_p_flip, 'opt_resp':mean(opt_resp), 'explore':mean(explore)}
+    '''
+
+
+
+#getOptResps(model_sims)
+
+#'''
+for cond in COND_NAMES:  
+    print cond, mean( [j['opt_resp'] for j in model_sims.values() if j['cond'] == cond])
+raise SystemExit
+#'''
+
+
+getOptResps(subjects)
+getTrialsUntilSwitch(model_sims)
+getTrialsUntilSwitch(subjects)
+
+for subj_num, subject in subjects.iteritems():
+    subject['model_opt'] = mean(map(lambda x:x['opt_resp'], subject['trials'][TRIALS_START:TRIALS_END]))/ mean(map(lambda x:x['opt_resp'],  model_sims[subj_num]['trials'][TRIALS_START:TRIALS_END]))
+
+
+dvs = ['trials_until_switch', 'explore', 'opt_resp']
+for dv in dvs:
+     figure()
+     title({'trials_until_switch':'Avg. Trials Before Switch to Optimal', 
+            'explore': 'Proportion Exploratory Choices',
+            'opt_resp':'Reward Harvesting Efficiency'}[dv])
+
+     bar1 = matplotlib.patches.Rectangle((0,0),0,0, edgecolor='black', color=(0, 0, 0))
+     bar3 = matplotlib.patches.Rectangle((0,0),0,0, edgecolor='black', color=(.6,.6,.6))
+     legend((bar1,bar3), ('Humans', 'Ideal Actor'))
+
+     x = 0
+     for cond in COND_NAMES:
+#          subject_predict = array([subjects[n]['predictions'][-1]/100.
+#                                   for n in sorted(subjects.keys()) if subjects[n]['cond']==cond])
+
+          subject_opt_resp = array([mean(map(lambda x:x['opt_resp'],  subjects[n]['trials'][TRIALS_START:TRIALS_END])) 
+                                   for n in sorted(subjects.keys()) if subjects[n]['cond']==cond])
+          subject_trials_until_switch = array([subjects[n]['trials_until_switch'] for n in sorted(subjects.keys()) if subjects[n]['cond']==cond])
+          subject_explore = array([mean(map(lambda x:x['explore'],  subjects[n]['trials'][TRIALS_START:TRIALS_END])) 
+                             for n in sorted(subjects.keys()) if subjects[n]['cond']==cond])
+
+          model_opt_resp = array([mean(map(lambda x:x['opt_resp'],  model_sims[n]['trials'][TRIALS_START:TRIALS_END])) 
+                            for n in sorted(model_sims.keys())if model_sims[n]['cond']==cond])
+          model_trials_until_switch = array([sim['trials_until_switch'] for sim in model_sims.values() if sim['cond']==cond]          )
+          model_explore = array([mean(map(lambda x:x['explore'],  model_sims[n]['trials'][TRIALS_START:TRIALS_END])) 
+                                 for n in sorted(model_sims.keys())if model_sims[n]['cond']==cond])
+
+#          subj_color = {'0.025':(0,0,1), '0.075':(0, .5, 0), '0.125':(1,0,0)}[cond]
+          subj_color = {'0.025':(0,0,1), '0.075':(0, .5, 0), '0.125':(1,0,0)}[cond]  #'gray'
+          model_color = map(lambda x:min(1,x+.6),subj_color) #'white'
+
+#          line = Line2D(range(10), range(10), linestyle='-', marker='o')
+          bar1 = matplotlib.patches.Rectangle((0,0),0,0, ec='black', color=subj_color) #(0, 0, 1))
+          bar2 = matplotlib.patches.Rectangle((0,0),0,0, ec='black', color=model_color) #(0.55, 0.55, 1))
+#          legend((bar1,bar2), ('human','model'))
+
+          bar(x, mean(eval('subject_'+dv)), yerr=stderr(eval('subject_'+dv)), width = .2, color=subj_color,label='human',ecolor='black')
+          bar(x+.2, mean(eval('model_'+dv)),yerr=stderr(eval('model_'+dv)), width = .2, color=model_color,label='model',ecolor='black')
+          x += .6
+     xticks([.2, .8, 1.4], COND_NAMES)
+     xlim(-.2, 1.8)
+     xlabel('P(flip)')
+     ylabel({'trials_until_switch':'Avg. Trials Before Switch to Optimal', 
+            'explore': 'Proportion Exploratory Choices',
+            'opt_resp':'Reward Harvesting Efficiency'}[dv])
+     show()
+#     legend()
+     
+
+
+
+figure()
+i = 0
+for cond in COND_NAMES:
+     model_opt_resp = array([mean(map(lambda x:x['opt_resp'],  model_sims[n]['trials'][TRIALS_START:TRIALS_END])) 
+                            for n in sorted(model_sims.keys())if model_sims[n]['cond']==cond])
+     subject_opt_resp = array([mean(map(lambda x:x['opt_resp'],  subjects[n]['trials'][TRIALS_START:TRIALS_END])) 
+                                   for n in sorted(subjects.keys()) if subjects[n]['cond']==cond])
+
+#     model_opt_resp = array([mean(map(lambda x:x['explore'],  model_sims[n]['trials'][TRIALS_START:TRIALS_END])) 
+#                            for n in sorted(model_sims.keys())if model_sims[n]['cond']==cond])
+#     subject_opt_resp = array([mean(map(lambda x:x['explore'],  subjects[n]['trials'][TRIALS_START:TRIALS_END])) 
+#                               for n in sorted(subjects.keys()) if subjects[n]['cond']==cond])
+
+     subject_opt = subject_opt_resp /model_opt_resp
+     i += 1
+     title(cond)
+
+     plot([-.1,4.8], [1., 1.], lw=1, color='blue',label='Ideal Actor')
+     plot([-.1,4.8], [.91, .91], lw=1, color='red',label='Naive RL')    #Naive abs. performance is .64, rel is .91
+     plot([-.1,4.8], [.76, .76], ls='--', color='black',label='Chance')    #rel chance performance is .76
+
+     legend()
+
+     x = 0
+     for y in subject_opt:
+          bar(x, y, width=.1, color={'0.025':'blue', '0.075':(.8,.8,.8), '0.125':'red'}[cond])
+          x += .1
+
+     xticks([0], ['']) #linspace(0,x,len(subjects)), sorted(subjects.keys()))
+#     ylim(0, 1.1)
+
+show()
+
+
+xlim (-.1, 4.8)
+ylim(0,1.2)

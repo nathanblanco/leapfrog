@@ -1,0 +1,46 @@
+libmdp_a-parser.o libmdp_a-parser.o: parser.c /usr/include/stdio.h \
+  /usr/include/sys/cdefs.h /usr/include/sys/_symbol_aliasing.h \
+  /usr/include/sys/_posix_availability.h /usr/include/Availability.h \
+  /usr/include/AvailabilityInternal.h /usr/include/_types.h \
+  /usr/include/sys/_types.h /usr/include/machine/_types.h \
+  /usr/include/i386/_types.h /usr/include/secure/_stdio.h \
+  /usr/include/secure/_common.h mdp-common.h parse_err.h mdp.h \
+  sparse-matrix.h parse_hash.h parse_constant.h imm-reward.h
+
+/usr/include/stdio.h:
+
+/usr/include/sys/cdefs.h:
+
+/usr/include/sys/_symbol_aliasing.h:
+
+/usr/include/sys/_posix_availability.h:
+
+/usr/include/Availability.h:
+
+/usr/include/AvailabilityInternal.h:
+
+/usr/include/_types.h:
+
+/usr/include/sys/_types.h:
+
+/usr/include/machine/_types.h:
+
+/usr/include/i386/_types.h:
+
+/usr/include/secure/_stdio.h:
+
+/usr/include/secure/_common.h:
+
+mdp-common.h:
+
+parse_err.h:
+
+mdp.h:
+
+sparse-matrix.h:
+
+parse_hash.h:
+
+parse_constant.h:
+
+imm-reward.h:
